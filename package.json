@@ -1,0 +1,38 @@
+{
+  "name": "nestjs-batch",
+  "version": "0.1.0",
+  "description": "High-performance hybrid batch framework for Nest.js powered by Rust",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:engine": "npm run build --workspace=packages/engine",
+    "build:core": "npm run build --workspace=packages/core",
+    "build:example": "npm run build --workspace=examples/basic-app",
+    "dev": "npm run dev --workspace=examples/basic-app",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "keywords": [
+    "nestjs",
+    "batch",
+    "rust",
+    "napi",
+    "chunk-processing",
+    "spring-batch"
+  ],
+  "author": "anonymous.rs",
+  "license": "MIT"
+}

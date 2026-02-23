@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../../examples/basic-app/dist",
+    "rootDir": "../../examples/basic-app/src",
+    "baseUrl": "../../examples/basic-app"
+  },
+  "include": [
+    "../../examples/basic-app/src/**/*.ts"
+  ],
+  "exclude": [
+    "../../examples/basic-app/node_modules",
+    "../../examples/basic-app/dist"
+  ]
+}

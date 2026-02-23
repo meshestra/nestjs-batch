@@ -1,0 +1,51 @@
+{
+  "name": "@nestjs-batch/engine",
+  "version": "0.1.0",
+  "description": "Rust-based high-performance batch execution engine for nestjs-batch",
+  "author": {
+    "name": "anonymous.rs",
+    "email": "jeff.cofos@gmail.com"
+  },
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "name": "nestjs-batch-engine",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "node --experimental-vm-modules $(npm bin)/jest",
+    "universal": "napi universal",
+    "version": "napi version",
+    "artifacts": "napi artifacts",
+    "clean": "rm -rf *.node dist target"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "@types/node": "^20.0.0"
+  },
+  "peerDependencies": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}

@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+packages/core/dist/
+packages/engine/target/
+
+# Rust compiled binaries
+**/*.node
+
+# Environment
+.env
+**/.env
+
+# NestJS / TypeScript build
+**/dist/
+**/*.js.map
+**/*.tsbuildinfo
+
+# Coverage
+**/coverage/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Problems (내부 문서)
+problems/

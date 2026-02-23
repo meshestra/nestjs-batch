@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecommerce-settlement-batch
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - batch-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-settlement-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-batch}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-batch}
+      POSTGRES_DB: ${DB_NAME:-settlement}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-batch} -d ${DB_NAME:-settlement}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - batch-network
+
+volumes:
+  postgres_data:
+
+networks:
+  batch-network:
+    driver: bridge

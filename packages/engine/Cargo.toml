@@ -1,0 +1,59 @@
+[package]
+name = "nestjs-batch-engine"
+version = "0.1.0"
+edition = "2021"
+authors = ["anonymous.rs <jeff.cofos@gmail.com>"]
+description = "High-performance Rust batch execution engine for nestjs-batch (NAPI-RS)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# NAPI-RS core bindings
+napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi5"] }
+napi-derive = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time utilities
+chrono = { version = "0.4", features = ["serde"] }
+
+# Database I/O (Rust-native, NAPI 경계 없음)
+sqlx = { version = "0.8", features = [
+  "runtime-tokio",       # Tokio 비동기 런타임
+  "postgres",            # PostgreSQL 드라이버
+  "mysql",               # MySQL / MariaDB 드라이버
+  "json",                # serde_json Value ↔ DB JSON 컬럼
+  "chrono",              # DateTime 컬럼
+  "macros",              # query! / query_as! 매크로
+] }
+
+# CPU-bound 병렬 계산 (compute 모듈)
+rayon = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true
