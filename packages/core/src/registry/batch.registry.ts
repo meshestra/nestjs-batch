@@ -1,17 +1,18 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ModuleRef, DiscoveryService } from '@nestjs/core';
+import { DiscoveryService, ModuleRef } from '@nestjs/core';
 import { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
-import {
-  JobDefinition,
-  JobDecoratorOptions,
-  StepDecoratorOptions,
-  StepDefinition,
-} from '../interfaces';
 import {
   JOB_METADATA_KEY,
   STEP_METADATA_KEY,
   STEP_METHODS_METADATA_KEY,
 } from '../decorators/constants';
+import {
+  JobDecoratorOptions,
+  JobDefinition,
+  StepDecoratorOptions,
+  StepDefinition,
+} from '../interfaces';
+import { toKebabCase } from '../utils/string.utils';
 
 /**
  * 앱 전체에 등록된 Job 목록을 관리하는 레지스트리.
@@ -28,7 +29,7 @@ export class BatchRegistry implements OnModuleInit {
   constructor(
     private readonly discovery: DiscoveryService,
     private readonly moduleRef: ModuleRef,
-  ) {}
+  ) { }
 
   onModuleInit(): void {
     this.scanJobs();
@@ -53,7 +54,7 @@ export class BatchRegistry implements OnModuleInit {
 
       // Job 이름: 옵션 > 클래스 이름 (PascalCase → kebab-case)
       const jobName =
-        jobMeta.name ?? this.toKebabCase(instance.constructor.name);
+        jobMeta.name ?? toKebabCase(instance.constructor.name);
 
       const steps = this.collectSteps(instance);
 
@@ -76,6 +77,10 @@ export class BatchRegistry implements OnModuleInit {
         `Registered Job: "${jobName}" with ${steps.length} step(s) → [${steps.map((s) => s.name).join(', ')}]`,
       );
     }
+
+
+
+
   }
 
   /**
@@ -112,7 +117,7 @@ export class BatchRegistry implements OnModuleInit {
       // 메서드 이름에서 Step 이름 보완
       if (!stepDef.name) {
         stepDef.name =
-          stepOptions.name ?? this.toKebabCase(String(methodKey));
+          stepOptions.name ?? toKebabCase(String(methodKey));
       }
 
       // 데코레이터 옵션으로 기본값 보완 (StepDefinition이 직접 지정한 값 우선)
@@ -143,11 +148,4 @@ export class BatchRegistry implements OnModuleInit {
     return Array.from(this.jobs.values());
   }
 
-  /** PascalCase 또는 camelCase → kebab-case 변환 */
-  private toKebabCase(name: string): string {
-    return name
-      .replace(/([A-Z])/g, '-$1')
-      .toLowerCase()
-      .replace(/^-/, '');
-  }
 }
