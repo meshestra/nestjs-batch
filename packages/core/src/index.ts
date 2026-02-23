@@ -19,7 +19,11 @@
 
 // 모듈
 export { BatchModule } from './batch.module';
-export type { BatchModuleOptions, BatchModuleAsyncOptions } from './batch.module';
+export type {
+  BatchModuleOptions,
+  BatchModuleAsyncOptions,
+  DataSourceOptions,
+} from './batch.module';
 
 // 데코레이터
 export { Job, Step } from './decorators';
@@ -35,11 +39,17 @@ export type {
   JobExecutionRecord,
   JobRepository,
   StepDefinition,
+  StepFactory,
   JobDefinition,
   IJobLauncher,
   JobDecoratorOptions,
   StepDecoratorOptions,
+  NativeReader,
+  NativeWriteQuery,
+  NativeWriter,
+  NativeStepDefinition,
 } from './interfaces';
+export { isNativeStep } from './interfaces';
 
 // 서비스
 export { JobLauncher } from './launcher';
@@ -49,4 +59,4 @@ export { BatchRegistry } from './registry';
 export { InMemoryJobRepository } from './repositories';
 
 // 상수
-export { JOB_REPOSITORY_TOKEN } from './batch.constants';
+export { JOB_REPOSITORY_TOKEN, NATIVE_DATASOURCE_TOKEN } from './batch.constants';

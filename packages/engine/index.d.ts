@@ -88,6 +88,17 @@ export declare class ChunkExecutor {
   get chunkSize(): number
   requestStop(): void
   /**
+   * Native DB I/O 배치를 실행하고 JS Promise<JobExecution> 을 반환한다.
+   *
+   * Reader/Writer가 Rust sqlx로 DB를 직접 처리하므로 NAPI 경계를 최소화한다.
+   *
+   * - `data_source`     : NativeDataSource (sqlx 커넥션 풀)
+   * - `reader_query`    : SELECT 쿼리 문자열 (LIMIT/OFFSET 자동 부가)
+   * - `writer_query_fn` : `(item: unknown) => { sql: string; params: unknown[] } | null`
+   * - `processor_fn`    : 선택적 JS Processor. 없으면 Reader → Writer 직통 (직렬화 0회)
+   */
+  executeNative(dataSource: NativeDataSource, readerQuery: string, writerQueryFn: (...args: any[]) => any, processorFn?: (...args: any[]) => any | undefined | null): object
+  /**
    * Chunk 지향 배치를 실행하고 JS Promise<JobExecution> 을 반환한다.
    *
    * 콜백 규약:
@@ -98,4 +109,30 @@ export declare class ChunkExecutor {
    *   reply 인자는 처리 완료 후 정확히 1회 호출. 오류 시 '__ERROR__:msg'.
    */
   execute(readerFn: (...args: any[]) => any, processorFn: (...args: any[]) => any, writerFn: (...args: any[]) => any): object
+}
+/**
+ * Rust sqlx 커넥션 풀을 NestJS DI 컨테이너에서 관리하기 위한 NAPI 래퍼.
+ *
+ * `NativeDataSource.connect(url)` 으로 생성하고,
+ * `BatchModule.forRoot({ datasource: { url } })` 에서 자동으로 초기화된다.
+ */
+export declare class NativeDataSource {
+  /**
+   * DB URL로 커넥션 풀을 생성한다.
+   *
+   * - `postgres://user:pass@host:5432/db` → PostgreSQL
+   * - `mysql://user:pass@host:3306/db`    → MySQL / MariaDB
+   *
+   * `max_connections` 기본값: 10
+   */
+  static connect(url: string, maxConnections?: number | undefined | null): Promise<NativeDataSource>
+  /**
+   * 커넥션 풀 헬스체크.
+   * BatchModule 초기화 시 DB 연결 가능 여부를 검증하는 데 사용한다.
+   */
+  ping(): Promise<void>
+  /** 현재 활성 커넥션 수를 반환한다. */
+  get poolSize(): number
+  /** 최대 커넥션 수를 반환한다. */
+  get maxConnections(): number
 }

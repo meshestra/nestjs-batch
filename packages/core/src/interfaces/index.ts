@@ -316,18 +316,143 @@ export interface StepDefinition {
 }
 
 /**
+ * Step 팩토리 함수 타입.
+ *
+ * `@Step()` 메서드는 런타임에 `JobParameters`를 받아 `StepDefinition` 또는
+ * `NativeStepDefinition`을 반환하는 팩토리로 취급된다.
+ * 이를 통해 파라미터가 결정되는 `launch()` 시점까지 Step 생성을 지연(Late Binding)한다.
+ */
+export type StepFactory = (
+  params: JobParameters,
+) => StepDefinition | NativeStepDefinition;
+
+/**
  * Job 전체를 정의하는 메타데이터.
  * `@Job()` 데코레이터와 `BatchRegistry`에서 사용된다.
  */
 export interface JobDefinition {
   /** Job 이름 (시스템 내에서 유일해야 함) */
   name: string;
-  /** 이 Job에 속한 Step 목록 (실행 순서대로) */
-  steps: StepDefinition[];
+  /**
+   * Step 팩토리 함수 목록 (실행 순서대로).
+   * `launch(params)` 호출 시 각 팩토리에 `params`를 전달하여 Step을 생성한다.
+   */
+  stepFactories: StepFactory[];
   /** 중복 실행 방지 여부 (기본값: true) */
   preventDuplicateRun?: boolean;
   /** Job 설명 (문서화용) */
   description?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NativeStepDefinition — Rust DB I/O 직접 처리 Step
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rust가 DB I/O를 직접 처리하는 Reader 정의.
+ * 정적 SELECT 쿼리를 전달하면 Rust가 LIMIT/OFFSET을 자동으로 부가한다.
+ */
+export interface NativeReader {
+  /**
+   * 실행할 SELECT 쿼리 문자열.
+   * Rust가 `LIMIT $1 OFFSET $2` (PostgreSQL) 또는 `LIMIT ? OFFSET ?` (MySQL) 를 자동으로 붙인다.
+   *
+   * @example
+   * `SELECT id, total_amount FROM orders WHERE status = 'DELIVERED' AND date = '2025-01-15'`
+   */
+  query: string;
+}
+
+/**
+ * Rust `DbWriter`에 전달할 SQL과 바인딩 파라미터.
+ * JS의 `writer.query(item)` 반환값 타입.
+ */
+export interface NativeWriteQuery {
+  /** 실행할 INSERT / UPDATE / DELETE 쿼리 */
+  sql: string;
+  /** SQL 플레이스홀더에 바인딩할 값 배열 */
+  params: unknown[];
+}
+
+/**
+ * Rust가 DB I/O를 직접 처리하는 Writer 정의.
+ * 아이템마다 `query(item)`이 호출되어 SQL과 params를 반환한다.
+ * Rust는 chunk 내 모든 쿼리를 단일 트랜잭션으로 묶어 실행한다.
+ */
+export interface NativeWriter {
+  /**
+   * 아이템 하나를 받아 실행할 SQL과 파라미터를 반환하는 함수.
+   * `null` 반환 시 해당 아이템을 건너뛴다.
+   *
+   * @example
+   * ```typescript
+   * query: (item: any) => ({
+   *   sql: 'INSERT INTO settlements (seller_id, amount) VALUES ($1, $2)',
+   *   params: [item.sellerId, item.amount],
+   * })
+   * ```
+   */
+  query: (item: unknown) => NativeWriteQuery | null;
+}
+
+/**
+ * Rust가 DB I/O를 직접 담당하는 Step 정의.
+ *
+ * `StepDefinition`과의 차이:
+ * - Reader/Writer가 JS 콜백이 아닌 Rust sqlx로 동작
+ * - Processor가 없으면 NAPI 경계를 전혀 거치지 않음 (직렬화 0회)
+ * - Processor가 있으면 해당 구간만 JSON 직렬화 2회 발생
+ * - Rust DbWriter가 chunk 단위 트랜잭션을 보장
+ *
+ * @example
+ * ```typescript
+ * @Step({ chunkSize: 500 })
+ * settleStep(): NativeStepDefinition {
+ *   return {
+ *     name: 'settle-step',
+ *     chunkSize: 500,
+ *     reader: { query: `SELECT seller_id, SUM(amount) FROM orders GROUP BY seller_id` },
+ *     processor: this.feeCalculator, // 선택적 JS Processor
+ *     writer: {
+ *       query: (item: any) => ({
+ *         sql: `INSERT INTO settlements VALUES ($1, $2)`,
+ *         params: [item.sellerId, item.amount],
+ *       }),
+ *     },
+ *   };
+ * }
+ * ```
+ */
+export interface NativeStepDefinition {
+  /** Step 이름 (Job 내에서 유일해야 함) */
+  name: string;
+  /** Chunk 크기 */
+  chunkSize: number;
+  /** Rust sqlx SELECT Reader */
+  reader: NativeReader;
+  /**
+   * 선택적 JS Processor.
+   * 생략하면 Reader → Writer 직통 (직렬화 0회, 최고 성능).
+   */
+  processor?: ItemProcessor<unknown, unknown>;
+  /** Rust sqlx INSERT/UPDATE Writer */
+  writer: NativeWriter;
+  /** 건너뛸 수 있는 최대 아이템 수 */
+  skipLimit?: number;
+  /** Writer 실패 시 재시도 횟수 */
+  retryLimit?: number;
+}
+
+/**
+ * `StepDefinition`과 `NativeStepDefinition`을 구분하는 타입 가드.
+ *
+ * `NativeStepDefinition`은 `reader.query` (string) 필드를 가진다.
+ * `StepDefinition`은 `reader` 가 `ItemReader` 인스턴스다.
+ */
+export function isNativeStep(
+  step: StepDefinition | NativeStepDefinition,
+): step is NativeStepDefinition {
+  return typeof (step as NativeStepDefinition).reader.query === 'string';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

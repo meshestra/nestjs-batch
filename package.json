@@ -1,6 +1,6 @@
 {
   "name": "nestjs-batch",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "High-performance hybrid batch framework for Nest.js powered by Rust",
   "private": true,
   "workspaces": [

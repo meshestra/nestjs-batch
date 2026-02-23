@@ -310,9 +310,10 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { ChunkExecutor, engineVersion, getBuildInfo, ping, pingAsync, nowMs, elapsedMs } = nativeBinding
+const { ChunkExecutor, NativeDataSource, engineVersion, getBuildInfo, ping, pingAsync, nowMs, elapsedMs } = nativeBinding
 
 module.exports.ChunkExecutor = ChunkExecutor
+module.exports.NativeDataSource = NativeDataSource
 module.exports.engineVersion = engineVersion
 module.exports.getBuildInfo = getBuildInfo
 module.exports.ping = ping

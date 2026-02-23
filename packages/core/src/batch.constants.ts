@@ -9,3 +9,6 @@ export const JOB_REPOSITORY_TOKEN = 'NESTJS_BATCH_JOB_REPOSITORY';
 
 /** BatchModule 옵션 주입 토큰 */
 export const BATCH_MODULE_OPTIONS_TOKEN = 'NESTJS_BATCH_MODULE_OPTIONS';
+
+/** NativeDataSource(Rust sqlx 커넥션 풀) 주입 토큰 */
+export const NATIVE_DATASOURCE_TOKEN = 'NESTJS_BATCH_NATIVE_DATASOURCE';

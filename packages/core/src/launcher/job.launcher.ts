@@ -4,11 +4,13 @@ import {
   JobExecutionRecord,
   JobParameters,
   JobRepository,
+  NativeStepDefinition,
   StepDefinition,
   StepExecutionRecord,
+  isNativeStep,
 } from '../interfaces';
 import { BatchRegistry } from '../registry/batch.registry';
-import { JOB_REPOSITORY_TOKEN } from '../batch.constants';
+import { JOB_REPOSITORY_TOKEN, NATIVE_DATASOURCE_TOKEN } from '../batch.constants';
 
 // Rust 엔진 타입 (빌드 전에는 any로 처리)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,6 +40,9 @@ export class JobLauncher implements IJobLauncher {
     private readonly registry: BatchRegistry,
     @Inject(JOB_REPOSITORY_TOKEN)
     private readonly jobRepository: JobRepository,
+    @Optional()
+    @Inject(NATIVE_DATASOURCE_TOKEN)
+    private readonly nativeDataSource: unknown = null,
   ) {}
 
   async launch(
@@ -82,8 +87,9 @@ export class JobLauncher implements IJobLauncher {
     this.logger.log(`Job "${jobName}" started. executionId=${jobExecutionId}`);
 
     try {
-      // Step 순차 실행
-      for (const stepDef of jobDef.steps) {
+      // Step 순차 실행: 팩토리에 jobParameters를 전달하여 실행 시점에 StepDefinition 생성
+      for (const stepFactory of jobDef.stepFactories) {
+        const stepDef = stepFactory(jobParameters);
         const stepRecord = await this.runStep(
           jobExecutionId,
           jobName,
@@ -160,7 +166,7 @@ export class JobLauncher implements IJobLauncher {
   private async runStep(
     jobExecutionId: string,
     jobName: string,
-    stepDef: StepDefinition,
+    stepDef: StepDefinition | NativeStepDefinition,
   ): Promise<StepExecutionRecord> {
     this.logger.log(
       `Step "${stepDef.name}" starting (chunkSize=${stepDef.chunkSize})`,
@@ -176,8 +182,58 @@ export class JobLauncher implements IJobLauncher {
       enableLogging: true,
     });
 
-    // 실행 중 executor 등록 (stop 요청 대비)
     this.runningExecutors.set(jobExecutionId, executor);
+
+    // ── Native 경로: Rust가 DB I/O를 직접 처리 ────────────────────────────
+    if (isNativeStep(stepDef) && this.nativeDataSource) {
+      // Rust writer_query_fn 시그니처:
+      //   (err: null, itemJson: string, reply: (resultJson: string) => void) => void
+      // Rust가 item을 JSON 문자열로 전달하면, JS가 파싱 후 query(item)을 호출하고
+      // 결과({ sql, params })를 JSON으로 직렬화하여 reply로 반환한다.
+      const writerQueryFn = (
+        _err: null,
+        itemJson: string,
+        reply: (json: string) => void,
+      ): void => {
+        try {
+          const item = JSON.parse(itemJson);
+          const result = stepDef.writer.query(item);
+          reply(result === null ? 'null' : JSON.stringify(result));
+        } catch (e: unknown) {
+          reply('__ERROR__:' + String(e));
+        }
+      };
+
+      const processorFn = stepDef.processor
+        ? (_err: null, itemsJson: string, reply: (json: string) => void): void => {
+            const items: unknown[] = JSON.parse(itemsJson);
+            (stepDef as NativeStepDefinition).processor!.process(items)
+              .then((processed) => reply(JSON.stringify(processed)))
+              .catch((e: unknown) => reply('__ERROR__:' + String(e)));
+          }
+        : undefined;
+
+      const rawResult = await executor.executeNative(
+        this.nativeDataSource,
+        stepDef.reader.query,
+        writerQueryFn,
+        processorFn,
+      );
+
+      return this.mapToStepRecord(stepDef.name, rawResult);
+    }
+
+    // ── JS 콜백 경로 (기존, Native가 불가능한 경우 폴백) ─────────────────
+    if (isNativeStep(stepDef)) {
+      this.logger.warn(
+        `Step "${stepDef.name}" is a NativeStepDefinition but NativeDataSource is not available. ` +
+          'Falling back to JS callback path is not supported for NativeStepDefinition. ' +
+          'Please configure BatchModule.forRoot({ datasource: { url } }).',
+      );
+      throw new Error(
+        `NativeDataSource is required for NativeStepDefinition (step: "${stepDef.name}").`,
+      );
+    }
 
     // Rust 엔진과의 콜백 규약:
     //   각 콜백은 (payload, reply: (json: string) => void) 시그니처를 가진다.

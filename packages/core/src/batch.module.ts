@@ -15,6 +15,7 @@ import { DiscoveryModule } from '@nestjs/core';
 import {
   BATCH_MODULE_OPTIONS_TOKEN,
   JOB_REPOSITORY_TOKEN,
+  NATIVE_DATASOURCE_TOKEN,
 } from './batch.constants';
 import { JobRepository } from './interfaces';
 import { JobLauncher } from './launcher/job.launcher';
@@ -24,6 +25,17 @@ import { InMemoryJobRepository } from './repositories/in-memory-job.repository';
 // ─────────────────────────────────────────────────────────────────────────────
 // 옵션 타입
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rust sqlx 커넥션 풀 옵션.
+ * `BatchModule.forRoot({ datasource: { url } })` 로 전달한다.
+ */
+export interface DataSourceOptions {
+  /** DB 접속 URL. `postgres://` 또는 `mysql://` 프로토콜을 지원한다. */
+  url: string;
+  /** 최대 커넥션 수 (기본값: 10) */
+  maxConnections?: number;
+}
 
 /**
  * `BatchModule.forRoot()` 동기 옵션
@@ -39,6 +51,19 @@ export interface BatchModuleOptions {
    * ```
    */
   jobRepository?: Type<JobRepository>;
+
+  /**
+   * Rust sqlx 커넥션 풀 설정.
+   * 제공 시 `NativeStepDefinition`에서 Rust가 DB I/O를 직접 처리한다.
+   *
+   * @example
+   * ```typescript
+   * BatchModule.forRoot({
+   *   datasource: { url: process.env.DATABASE_URL, maxConnections: 10 },
+   * })
+   * ```
+   */
+  datasource?: DataSourceOptions;
 }
 
 /**
@@ -95,17 +120,20 @@ export class BatchModule {
    */
   static forRoot(options: BatchModuleOptions = {}): DynamicModule {
     const repoProvider = BatchModule.createRepositoryProvider(options);
+    const datasourceProvider = BatchModule.createDatasourceProvider(options);
 
     return {
       module: BatchModule,
       imports: [DiscoveryModule],
       providers: [
         repoProvider,
+        datasourceProvider,
         BatchRegistry,
         JobLauncher,
       ],
       exports: [
         JOB_REPOSITORY_TOKEN,
+        NATIVE_DATASOURCE_TOKEN,
         BatchRegistry,
         JobLauncher,
       ],
@@ -133,17 +161,26 @@ export class BatchModule {
       inject: [BATCH_MODULE_OPTIONS_TOKEN],
     };
 
+    const datasourceProvider: FactoryProvider = {
+      provide: NATIVE_DATASOURCE_TOKEN,
+      useFactory: (opts: BatchModuleOptions) =>
+        BatchModule.connectDatasource(opts),
+      inject: [BATCH_MODULE_OPTIONS_TOKEN],
+    };
+
     return {
       module: BatchModule,
       imports: [DiscoveryModule, ...(asyncOptions.imports ?? [])],
       providers: [
         asyncProvider,
         repoProvider,
+        datasourceProvider,
         BatchRegistry,
         JobLauncher,
       ],
       exports: [
         JOB_REPOSITORY_TOKEN,
+        NATIVE_DATASOURCE_TOKEN,
         BatchRegistry,
         JobLauncher,
       ],
@@ -159,17 +196,48 @@ export class BatchModule {
     options: BatchModuleOptions,
   ): Provider {
     if (options.jobRepository) {
-      // 사용자 제공 Repository 클래스를 DI 토큰으로 등록
       return {
         provide: JOB_REPOSITORY_TOKEN,
         useClass: options.jobRepository,
       };
     }
-
-    // 기본값: InMemoryJobRepository
     return {
       provide: JOB_REPOSITORY_TOKEN,
       useClass: InMemoryJobRepository,
     };
+  }
+
+  private static createDatasourceProvider(
+    options: BatchModuleOptions,
+  ): FactoryProvider {
+    return {
+      provide: NATIVE_DATASOURCE_TOKEN,
+      useFactory: () => BatchModule.connectDatasource(options),
+    };
+  }
+
+  /**
+   * datasource 옵션이 있으면 `NativeDataSource.connect()`를 호출하고,
+   * 없으면 null을 반환한다.
+   *
+   * JobLauncher는 null 여부를 체크하여 Native 실행 경로를 선택한다.
+   */
+  private static async connectDatasource(
+    options: BatchModuleOptions,
+  ): Promise<unknown> {
+    if (!options.datasource) return null;
+
+    // 빌드된 Rust 엔진이 없는 환경(개발/CI)에서도 graceful하게 처리
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const engine = require('@nestjs-batch/engine');
+      return await engine.NativeDataSource.connect(
+        options.datasource.url,
+        options.datasource.maxConnections,
+      );
+    } catch {
+      // 엔진 바이너리가 없으면 null 반환 (JS 콜백 경로로 폴백)
+      return null;
+    }
   }
 }

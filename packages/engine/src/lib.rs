@@ -32,6 +32,8 @@
 //! [JobExecution] → NestJS JobRepository
 //! ```
 
+use std::sync::Arc;
+
 use napi_derive::napi;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +51,70 @@ pub mod job_execution;
 
 pub use chunk_executor::{ChunkExecutor, ChunkExecutorOptions};
 pub use job_execution::{JobExecution, JobStatus, StepExecution};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NativeDataSource
+//
+// BatchModule.forRoot({ datasource: { url, maxConnections } }) 에서 생성되어
+// NestJS DI 컨테이너에 등록된다.
+//
+// ChunkExecutor::execute_native() 호출 시 이 객체를 전달하면
+// Rust가 sqlx 커넥션 풀로 DB I/O를 직접 처리한다.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rust sqlx 커넥션 풀을 NestJS DI 컨테이너에서 관리하기 위한 NAPI 래퍼.
+///
+/// `NativeDataSource.connect(url)` 으로 생성하고,
+/// `BatchModule.forRoot({ datasource: { url } })` 에서 자동으로 초기화된다.
+#[napi]
+pub struct NativeDataSource {
+    pub(crate) pool: Arc<io::DbPool>,
+}
+
+#[napi]
+impl NativeDataSource {
+    /// DB URL로 커넥션 풀을 생성한다.
+    ///
+    /// - `postgres://user:pass@host:5432/db` → PostgreSQL
+    /// - `mysql://user:pass@host:3306/db`    → MySQL / MariaDB
+    ///
+    /// `max_connections` 기본값: 10
+    #[napi(factory)]
+    pub async fn connect(
+        url: String,
+        max_connections: Option<u32>,
+    ) -> napi::Result<Self> {
+        let pool = io::DbPool::connect(&url, max_connections.unwrap_or(10))
+            .await
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+        Ok(Self {
+            pool: Arc::new(pool),
+        })
+    }
+
+    /// 커넥션 풀 헬스체크.
+    /// BatchModule 초기화 시 DB 연결 가능 여부를 검증하는 데 사용한다.
+    #[napi]
+    pub async fn ping(&self) -> napi::Result<()> {
+        self.pool
+            .ping()
+            .await
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// 현재 활성 커넥션 수를 반환한다.
+    #[napi(getter)]
+    pub fn pool_size(&self) -> u32 {
+        self.pool.size()
+    }
+
+    /// 최대 커넥션 수를 반환한다.
+    #[napi(getter)]
+    pub fn max_connections(&self) -> u32 {
+        self.pool.max_connections()
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 엔진 버전 및 메타데이터

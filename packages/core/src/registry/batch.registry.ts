@@ -9,8 +9,9 @@ import {
 import {
   JobDecoratorOptions,
   JobDefinition,
+  JobParameters,
   StepDecoratorOptions,
-  StepDefinition,
+  StepFactory,
 } from '../interfaces';
 import { toKebabCase } from '../utils/string.utils';
 
@@ -18,8 +19,11 @@ import { toKebabCase } from '../utils/string.utils';
  * 앱 전체에 등록된 Job 목록을 관리하는 레지스트리.
  *
  * `OnModuleInit` 훅에서 `DiscoveryService`로 모든 Provider를 스캔하고,
- * `@Job()` 메타데이터가 붙은 클래스의 `@Step()` 메서드를 수집하여
- * `JobDefinition` 맵으로 구성한다.
+ * `@Job()` 메타데이터가 붙은 클래스의 `@Step()` 메서드를 **팩토리 함수**로 수집한다.
+ *
+ * Step 메서드는 초기화 시점에 호출하지 않는다.
+ * `JobLauncher.launch(params)` 시점에 각 팩토리에 `params`를 전달하여
+ * StepDefinition을 생성한다 — Late Binding.
  */
 @Injectable()
 export class BatchRegistry implements OnModuleInit {
@@ -29,7 +33,7 @@ export class BatchRegistry implements OnModuleInit {
   constructor(
     private readonly discovery: DiscoveryService,
     private readonly moduleRef: ModuleRef,
-  ) { }
+  ) {}
 
   onModuleInit(): void {
     this.scanJobs();
@@ -56,9 +60,9 @@ export class BatchRegistry implements OnModuleInit {
       const jobName =
         jobMeta.name ?? toKebabCase(instance.constructor.name);
 
-      const steps = this.collectSteps(instance);
+      const stepFactories = this.collectStepFactories(instance);
 
-      if (steps.length === 0) {
+      if (stepFactories.length === 0) {
         this.logger.warn(
           `Job "${jobName}" has no @Step() methods. Skipping registration.`,
         );
@@ -67,33 +71,33 @@ export class BatchRegistry implements OnModuleInit {
 
       const jobDefinition: JobDefinition = {
         name: jobName,
-        steps,
+        stepFactories,
         preventDuplicateRun: jobMeta.preventDuplicateRun ?? true,
         description: jobMeta.description,
       };
 
       this.jobs.set(jobName, jobDefinition);
       this.logger.log(
-        `Registered Job: "${jobName}" with ${steps.length} step(s) → [${steps.map((s) => s.name).join(', ')}]`,
+        `Registered Job: "${jobName}" with ${stepFactories.length} step(s)`,
       );
     }
-
-
-
-
   }
 
   /**
-   * Job 클래스 인스턴스에서 @Step() 메서드를 수집하여 StepDefinition 배열로 반환한다.
+   * Job 클래스 인스턴스에서 @Step() 메서드를 수집하여 StepFactory 배열로 반환한다.
+   *
+   * Step 메서드를 즉시 호출하지 않고 클로저로 감싸 팩토리로 반환한다.
+   * `launch(params)` 호출 시 팩토리에 params를 전달하여 StepDefinition을 생성한다.
    */
-  private collectSteps(instance: any): StepDefinition[] {
+  private collectStepFactories(instance: any): StepFactory[] {
     const stepMethods: (string | symbol)[] =
       Reflect.getOwnMetadata(
         STEP_METHODS_METADATA_KEY,
         instance.constructor.prototype,
       ) ?? [];
 
-    const stepsWithOrder: Array<{ step: StepDefinition; order: number }> = [];
+    const factoriesWithOrder: Array<{ factory: StepFactory; order: number }> =
+      [];
 
     for (const methodKey of stepMethods) {
       const stepOptions: StepDecoratorOptions =
@@ -103,34 +107,29 @@ export class BatchRegistry implements OnModuleInit {
           methodKey,
         ) ?? {};
 
-      // @Step() 붙은 메서드를 호출하여 StepDefinition을 가져옴
-      let stepDef: StepDefinition;
-      try {
-        stepDef = instance[methodKey]();
-      } catch (err) {
-        this.logger.error(
-          `Failed to collect step from method "${String(methodKey)}": ${(err as Error).message}`,
-        );
-        continue;
-      }
+      // Step 메서드를 즉시 호출하지 않고 params를 받는 팩토리 클로저로 래핑
+      const factory: StepFactory = (params: JobParameters) => {
+        const stepDef = instance[methodKey](params);
 
-      // 메서드 이름에서 Step 이름 보완
-      if (!stepDef.name) {
-        stepDef.name =
-          stepOptions.name ?? toKebabCase(String(methodKey));
-      }
+        // 메서드 이름에서 Step 이름 보완
+        if (!stepDef.name) {
+          stepDef.name = stepOptions.name ?? toKebabCase(String(methodKey));
+        }
 
-      // 데코레이터 옵션으로 기본값 보완 (StepDefinition이 직접 지정한 값 우선)
-      stepDef.chunkSize = stepDef.chunkSize ?? stepOptions.chunkSize ?? 100;
-      stepDef.skipLimit = stepDef.skipLimit ?? stepOptions.skipLimit ?? 0;
-      stepDef.retryLimit = stepDef.retryLimit ?? stepOptions.retryLimit ?? 3;
+        // 데코레이터 옵션으로 기본값 보완 (StepDefinition이 직접 지정한 값 우선)
+        stepDef.chunkSize = stepDef.chunkSize ?? stepOptions.chunkSize ?? 100;
+        stepDef.skipLimit = stepDef.skipLimit ?? stepOptions.skipLimit ?? 0;
+        stepDef.retryLimit = stepDef.retryLimit ?? stepOptions.retryLimit ?? 3;
 
-      stepsWithOrder.push({ step: stepDef, order: stepOptions.order ?? 0 });
+        return stepDef;
+      };
+
+      factoriesWithOrder.push({ factory, order: stepOptions.order ?? 0 });
     }
 
     // order 오름차순 정렬 → Step 실행 순서 결정
-    stepsWithOrder.sort((a, b) => a.order - b.order);
-    return stepsWithOrder.map((s) => s.step);
+    factoriesWithOrder.sort((a, b) => a.order - b.order);
+    return factoriesWithOrder.map((f) => f.factory);
   }
 
   /** Job 이름으로 JobDefinition을 조회한다. */
@@ -147,5 +146,4 @@ export class BatchRegistry implements OnModuleInit {
   getAllJobs(): JobDefinition[] {
     return Array.from(this.jobs.values());
   }
-
 }

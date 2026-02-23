@@ -1,6 +1,6 @@
 [package]
 name = "nestjs-batch-engine"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["anonymous.rs <jeff.cofos@gmail.com>"]
 description = "High-performance Rust batch execution engine for nestjs-batch (NAPI-RS)"
@@ -36,7 +36,10 @@ sqlx = { version = "0.8", features = [
   "json",                # serde_json Value ↔ DB JSON 컬럼
   "chrono",              # DateTime 컬럼
   "macros",              # query! / query_as! 매크로
+  "rust_decimal",        # NUMERIC 컬럼 바인딩
 ] }
+
+rust_decimal = "1"
 
 # CPU-bound 병렬 계산 (compute 모듈)
 rayon = "1"

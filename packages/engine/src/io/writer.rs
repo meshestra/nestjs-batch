@@ -33,7 +33,7 @@ pub enum WriterError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 아이템 하나에 대한 SQL 실행 단위.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WriteQuery {
     /// 실행할 SQL 문
     pub sql: String,
@@ -116,12 +116,10 @@ impl DbWriter {
             let wq = (self.query_builder)(item)
                 .ok_or(WriterError::NullQuery(idx))?;
 
-            let mut query = sqlx::query(&wq.sql);
-            for param in &wq.params {
-                query = bind_value_postgres(query, param);
-            }
-
-            query.execute(&mut *tx).await?;
+            // prepared statement의 바이너리 프로토콜 타입 불일치를 피하기 위해
+            // 파라미터를 SQL에 직접 보간한다.
+            let sql = interpolate_params(&wq.sql, &wq.params);
+            sqlx::query(&sql).execute(&mut *tx).await?;
             written += 1;
         }
 
@@ -143,12 +141,8 @@ impl DbWriter {
             let wq = (self.query_builder)(item)
                 .ok_or(WriterError::NullQuery(idx))?;
 
-            let mut query = sqlx::query(&wq.sql);
-            for param in &wq.params {
-                query = bind_value_mysql(query, param);
-            }
-
-            query.execute(&mut *tx).await?;
+            let sql = interpolate_params_mysql(&wq.sql, &wq.params);
+            sqlx::query(&sql).execute(&mut *tx).await?;
             written += 1;
         }
 
@@ -158,44 +152,74 @@ impl DbWriter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 헬퍼: serde_json Value → sqlx 바인딩
+// 헬퍼: $1/$2/... 플레이스홀더에 값을 직접 보간
+//
+// prepared statement의 바이너리 프로토콜 타입 불일치를 피하기 위해
+// 파라미터를 SQL 문자열에 직접 삽입한다.
+// SQL 인젝션 방지를 위해 각 타입별로 안전하게 이스케이프한다.
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn bind_value_postgres<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: &Value,
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match value {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(b) => query.bind(*b),
+/// PostgreSQL 용 ($1, $2, ...) 파라미터 보간
+fn interpolate_params(sql: &str, params: &[Value]) -> String {
+    let mut result = sql.to_string();
+    // $N을 큰 인덱스부터 처리해야 $10이 $1로 잘못 치환되는 것을 방지한다.
+    for (i, param) in params.iter().enumerate().rev() {
+        let placeholder = format!("${}", i + 1);
+        let literal = value_to_pg_literal(param);
+        result = result.replace(&placeholder, &literal);
+    }
+    result
+}
+
+/// MySQL 용 (?) 파라미터 보간
+fn interpolate_params_mysql(sql: &str, params: &[Value]) -> String {
+    let mut result = String::new();
+    let mut param_iter = params.iter();
+    for ch in sql.chars() {
+        if ch == '?' {
+            if let Some(param) = param_iter.next() {
+                result.push_str(&value_to_mysql_literal(param));
+            } else {
+                result.push('?');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn value_to_pg_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                query.bind(i)
+                i.to_string()
+            } else if let Some(f) = n.as_f64() {
+                // 소수점 표현 — 부동소수점 오차를 최소화하기 위해 충분한 정밀도 사용
+                format!("{:.10}", f)
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_string()
             } else {
-                query.bind(n.as_f64().unwrap_or(0.0))
+                n.to_string()
             }
         }
-        Value::String(s) => query.bind(s.clone()),
-        other => query.bind(other.to_string()),
+        // 문자열은 작은따옴표로 감싸고 내부 작은따옴표를 이스케이프한다.
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        // 배열/오브젝트는 JSON 문자열로 변환
+        other => format!("'{}'", other.to_string().replace('\'', "''")),
     }
 }
 
-fn bind_value_mysql<'q>(
-    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    value: &Value,
-) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    match value {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(b) => query.bind(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                query.bind(i)
-            } else {
-                query.bind(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        Value::String(s) => query.bind(s.clone()),
-        other => query.bind(other.to_string()),
+fn value_to_mysql_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "\\'")),
+        other => format!("'{}'", other.to_string().replace('\'', "\\'")),
     }
 }
 

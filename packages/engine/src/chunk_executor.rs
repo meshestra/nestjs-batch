@@ -12,6 +12,8 @@ use napi_derive::napi;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
+use crate::compute::{ProcessorKind, JsProcessorDirect};
+use crate::io::{DbReader, DbWriter, QueryDef, WriteQuery};
 use crate::job_execution::{JobExecution, JobStatus, StepExecution};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,6 +38,14 @@ type ReplyTx = tokio::sync::oneshot::Sender<napi::Result<String>>;
 
 // Rust → JS 호출 Tsfn 타입 (payload: CallPayload)
 type CallTsfn = ThreadsafeFunction<CallPayload, ErrorStrategy::CalleeHandled>;
+
+// execute_native writer_query_fn 전용 타입
+// payload: (item JSON Value, reply sender)
+type WriterReplyTx = std::sync::mpsc::Sender<napi::Result<String>>;
+type WriterQueryTsfn = ThreadsafeFunction<
+    (Value, Arc<Mutex<Option<WriterReplyTx>>>),
+    ErrorStrategy::CalleeHandled,
+>;
 
 // payload: Rust → JS 로 보내는 데이터
 struct CallPayload {
@@ -106,6 +116,108 @@ impl ChunkExecutor {
     pub fn request_stop(&self) {
         warn!(job=%self.options.job_name, "외부 중단 신호 수신");
         self.stop_signal.stop();
+    }
+
+    /// Native DB I/O 배치를 실행하고 JS Promise<JobExecution> 을 반환한다.
+    ///
+    /// Reader/Writer가 Rust sqlx로 DB를 직접 처리하므로 NAPI 경계를 최소화한다.
+    ///
+    /// - `data_source`     : NativeDataSource (sqlx 커넥션 풀)
+    /// - `reader_query`    : SELECT 쿼리 문자열 (LIMIT/OFFSET 자동 부가)
+    /// - `writer_query_fn` : `(item: unknown) => { sql: string; params: unknown[] } | null`
+    /// - `processor_fn`    : 선택적 JS Processor. 없으면 Reader → Writer 직통 (직렬화 0회)
+    #[napi]
+    pub fn execute_native(
+        &self,
+        env: Env,
+        data_source: &crate::NativeDataSource,
+        reader_query: String,
+        writer_query_fn: JsFunction,
+        processor_fn: Option<JsFunction>,
+    ) -> napi::Result<Object> {
+        let pool = Arc::clone(&data_source.pool);
+
+        // DbReader: 정적 쿼리 — Rust가 LIMIT/OFFSET 자동 부가
+        let reader = DbReader::new((*pool).clone(), QueryDef::Static(reader_query));
+
+        // DbWriter: writer_query_fn을 ThreadsafeFunction으로 변환
+        // JS 함수 `(item) => { sql, params } | null` 을 Rust 클로저로 래핑
+        let writer_tsfn: WriterQueryTsfn = writer_query_fn.create_threadsafe_function(
+            0,
+            |ctx: ThreadSafeCallContext<(Value, Arc<Mutex<Option<WriterReplyTx>>>)>| {
+                let (item, reply_tx_arc) = ctx.value;
+                let env = ctx.env;
+
+                let item_json = serde_json::to_string(&item)
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+                let arg0 = env.create_string(&item_json)?.into_unknown();
+
+                let reply_fn: napi::JsFunction =
+                    env.create_function_from_closure("reply", move |ctx| {
+                        let json: String = ctx.get::<String>(0).unwrap_or_default();
+                        if let Ok(mut guard) = reply_tx_arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                let result = if json.starts_with("__ERROR__:") {
+                                    Err(napi::Error::from_reason(json[10..].to_string()))
+                                } else {
+                                    Ok(json)
+                                };
+                                let _ = tx.send(result);
+                            }
+                        }
+                        ctx.env.get_undefined()
+                    })?;
+
+                Ok(vec![arg0, reply_fn.into_unknown()])
+            },
+        )?;
+
+        let writer_tsfn = Arc::new(writer_tsfn);
+        let writer = DbWriter::new((*pool).clone(), move |item: &Value| -> Option<WriteQuery> {
+            // ThreadsafeFunction을 동기적으로 호출하기 위해 tokio oneshot 사용
+            let tsfn = Arc::clone(&writer_tsfn);
+            let item = item.clone();
+
+            // Tokio 컨텍스트 안에서 block_on 대신 futures::executor::block_on 사용 불가.
+            // 대신 표준 스레드 채널(std::sync::mpsc)로 동기 호출 구현.
+            let (tx, rx) = std::sync::mpsc::channel::<napi::Result<String>>();
+            let reply_tx = Arc::new(Mutex::new(Some(tx)));
+
+            tsfn.call(
+                Ok((item, reply_tx)),
+                ThreadsafeFunctionCallMode::Blocking,
+            );
+
+            match rx.recv() {
+                Ok(Ok(json)) if json == "null" || json.is_empty() => None,
+                Ok(Ok(json)) => serde_json::from_str::<WriteQuery>(&json).ok(),
+                _ => None,
+            }
+        });
+
+        // Processor 생성
+        let processor = match processor_fn {
+            Some(f) => ProcessorKind::JsBridge(JsProcessorDirect::new(f, 30_000)?),
+            None    => ProcessorKind::None,
+        };
+
+        let (deferred, promise) = env.create_deferred::<JobExecution, _>()?;
+        let options = self.options.clone();
+        let stop_signal = self.stop_signal.clone();
+        stop_signal.reset();
+
+        tokio::spawn(async move {
+            let result = run_native_chunk_loop(
+                options, stop_signal, reader, processor, writer,
+            ).await;
+
+            match result {
+                Ok(job_exec) => deferred.resolve(|_env| Ok(job_exec)),
+                Err(e)       => deferred.reject(e),
+            }
+        });
+
+        Ok(promise)
     }
 
     /// Chunk 지향 배치를 실행하고 JS Promise<JobExecution> 을 반환한다.
@@ -405,6 +517,134 @@ fn parse_array_json(json: &str) -> napi::Result<Vec<Value>> {
         Value::Null       => Ok(vec![]),
         other => Err(napi::Error::from_reason(format!("배열이 아닌 값: {other:?}"))),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Native Chunk 루프 (Rust DB I/O 직접 처리)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reader/Writer가 Rust sqlx로 직접 DB를 처리하는 청크 루프.
+///
+/// Processor 종류별 직렬화 횟수:
+///   - ProcessorKind::None      → 0회 (Reader → Writer 직통)
+///   - ProcessorKind::Native    → 0회 (rayon 병렬)
+///   - ProcessorKind::JsBridge  → 2회 (JS 위임 시 불가피)
+async fn run_native_chunk_loop(
+    options: ChunkExecutorOptions,
+    stop_signal: StopSignal,
+    reader: DbReader,
+    processor: ProcessorKind,
+    writer: DbWriter,
+) -> napi::Result<JobExecution> {
+    let skip_limit  = options.skip_limit.unwrap_or(0) as i64;
+    let retry_limit = options.retry_limit.unwrap_or(3);
+    let chunk_size  = options.chunk_size;
+
+    let mut job_exec  = JobExecution::new(&options.job_name);
+    let mut step_exec = StepExecution::new(&options.step_name);
+
+    info!(job=%options.job_name, step=%options.step_name, chunk_size, "Native Chunk 루프 시작");
+
+    let mut offset: u32 = 0;
+
+    loop {
+        if stop_signal.is_stopped() {
+            warn!(offset, "중단 신호 — Native 루프 종료");
+            step_exec.complete(JobStatus::Stopped);
+            job_exec.accumulate_step(&step_exec);
+            job_exec.stop(Some("외부 중단 요청".into()));
+            return Ok(job_exec);
+        }
+
+        // ── 1. Rust DbReader — sqlx SELECT (직렬화 없음) ─────────────────
+        debug!(offset, "Native Reader 호출");
+        let items = reader
+            .read(offset, chunk_size)
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("Native Reader 오류: {e}")))?;
+
+        let Some(items) = items else {
+            debug!("Native Reader null — 데이터 소진");
+            break;
+        };
+        if items.is_empty() {
+            break;
+        }
+
+        let read_in_chunk = items.len() as i64;
+        step_exec.read_count += read_in_chunk;
+        debug!(read_in_chunk, "Native Reader 완료");
+
+        // ── 2. Processor (None/Native: 직렬화 0회, JsBridge: 2회) ────────
+        let processed = processor
+            .process(items)
+            .await
+            .map_err(|e| napi::Error::from_reason(format!("Processor 오류: {e}")))?;
+
+        let processed_count = processed.len() as i64;
+        step_exec.process_count += processed_count;
+
+        if skip_limit > 0 && step_exec.total_skip_count() > skip_limit {
+            let msg = format!("skip_limit({skip_limit}) 초과");
+            error!("{}", msg);
+            step_exec.complete(JobStatus::Failed(msg.clone()));
+            job_exec.accumulate_step(&step_exec);
+            job_exec.fail(msg);
+            return Ok(job_exec);
+        }
+
+        // ── 3. Rust DbWriter — sqlx INSERT/UPDATE + 트랜잭션 (직렬화 없음) ─
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match writer.write(&processed).await {
+                Ok(written) => {
+                    step_exec.write_count  += written as i64;
+                    step_exec.commit_count += 1;
+                    debug!(written, commits=step_exec.commit_count, "Native Chunk 커밋");
+                    break;
+                }
+                Err(e) if attempt <= retry_limit => {
+                    step_exec.rollback_count += 1;
+                    warn!(attempt, error=%e, "Native Writer 재시도");
+                    tokio::time::sleep(
+                        std::time::Duration::from_millis(100 * (1u64 << (attempt - 1)))
+                    ).await;
+                }
+                Err(e) => {
+                    step_exec.rollback_count  += 1;
+                    step_exec.write_skip_count += processed_count;
+                    if skip_limit > 0 && step_exec.total_skip_count() <= skip_limit {
+                        warn!(error=%e, "Native Writer 오류 — skip 내 계속");
+                        break;
+                    } else {
+                        error!(error=%e, "Native Writer 최대 재시도 초과 — Job FAILED");
+                        step_exec.complete(JobStatus::Failed(e.to_string()));
+                        job_exec.accumulate_step(&step_exec);
+                        job_exec.fail(e.to_string());
+                        return Ok(job_exec);
+                    }
+                }
+            }
+        }
+
+        offset += chunk_size;
+        if (read_in_chunk as u32) < chunk_size {
+            debug!("Native 마지막 페이지 — 루프 종료");
+            break;
+        }
+    }
+
+    step_exec.complete(JobStatus::Completed);
+    job_exec.accumulate_step(&step_exec);
+    job_exec.complete();
+
+    info!(
+        job=%job_exec.job_name, status=%job_exec.status,
+        read=job_exec.read_count, written=job_exec.write_count,
+        commits=job_exec.commit_count, "Native Job 완료"
+    );
+    Ok(job_exec)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
